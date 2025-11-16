@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-# Calculate report function with avg column support
 def calculate_report(df, avg_col=None):
     df['outcome'] = df['outcome'].str.strip().str.lower()
     required_cols = ['bot', 'mobile_number', 'outcome', 'contacted', 'date', 'recording_url']
@@ -20,7 +19,13 @@ def calculate_report(df, avg_col=None):
     df['recording_url'] = df['recording_url'].fillna('').astype(str).str.strip()
 
     all_bots = sorted(df['bot'].unique())
+
     latest_per_lead = df.sort_values('date').groupby(['bot', 'mobile_number'], as_index=False).last()
+
+    # Determine if any call for bot/mobile_number has non-empty recording_url
+    lead_connection_status = df.groupby(['bot', 'mobile_number'])['recording_url'].apply(lambda urls: (urls != '').any()).reset_index().rename(columns={'recording_url': 'is_connected'})
+
+    latest_per_lead = latest_per_lead.merge(lead_connection_status, on=['bot', 'mobile_number'], how='left')
 
     follow_up_exclude = {"assign to live agent", "converted", "lost"}
 
@@ -35,20 +40,21 @@ def calculate_report(df, avg_col=None):
     lost_row = {'Metric': 'Lost'}
     converted_row = {'Metric': 'Converted'}
 
-    sheets_by_category = {}
-    sheets_by_category["connected"] = latest_per_lead[latest_per_lead['recording_url'] != '']
-    sheets_by_category["not_connected"] = latest_per_lead[latest_per_lead['recording_url'] == '']
-    sheets_by_category["converted"] = latest_per_lead[latest_per_lead['outcome'] == 'converted']
-    sheets_by_category["lost"] = latest_per_lead[latest_per_lead['outcome'] == 'lost']
-    sheets_by_category["assigned_to_human_agent"] = latest_per_lead[latest_per_lead['outcome'] == 'assign to live agent']
-    sheets_by_category["follow_up"] = latest_per_lead[~latest_per_lead['outcome'].isin(follow_up_exclude)]
-
-    latest_per_lead['connected_flag'] = latest_per_lead['recording_url'] != ''
-    latest_per_lead['not_connected_flag'] = latest_per_lead['recording_url'] == ''
+    # Flags based on new logic
+    latest_per_lead['connected_flag'] = latest_per_lead['is_connected'] == True
+    latest_per_lead['not_connected_flag'] = latest_per_lead['is_connected'] == False
     latest_per_lead['converted_flag'] = latest_per_lead['outcome'] == 'converted'
     latest_per_lead['lost_flag'] = latest_per_lead['outcome'] == 'lost'
     latest_per_lead['assigned_to_agent_flag'] = latest_per_lead['outcome'] == 'assign to live agent'
     latest_per_lead['follow_up_flag'] = ~latest_per_lead['outcome'].isin(follow_up_exclude)
+
+    sheets_by_category = {}
+    sheets_by_category["connected"] = latest_per_lead[latest_per_lead['connected_flag']]
+    sheets_by_category["not_connected"] = latest_per_lead[latest_per_lead['not_connected_flag']]
+    sheets_by_category["converted"] = latest_per_lead[latest_per_lead['converted_flag']]
+    sheets_by_category["lost"] = latest_per_lead[latest_per_lead['lost_flag']]
+    sheets_by_category["assigned_to_human_agent"] = latest_per_lead[latest_per_lead['assigned_to_agent_flag']]
+    sheets_by_category["follow_up"] = latest_per_lead[latest_per_lead['follow_up_flag']]
 
     lead_summary_cols = [
         'bot', 'mobile_number', 'date', 'outcome',
@@ -67,13 +73,13 @@ def calculate_report(df, avg_col=None):
 
         bot_latest = latest_per_lead[latest_per_lead['bot'] == bot_name]
 
-        connected_count = bot_latest[bot_latest['recording_url'] != '']['mobile_number'].nunique()
-        not_connected_count = bot_latest[bot_latest['recording_url'] == '']['mobile_number'].nunique()
+        connected_count = bot_latest[bot_latest['connected_flag']]['mobile_number'].nunique()
+        not_connected_count = bot_latest[bot_latest['not_connected_flag']]['mobile_number'].nunique()
         connectivity_perc = round((connected_count / unique_leads), 2) if unique_leads > 0 else 0.0
-        follow_up_count = bot_latest[~bot_latest['outcome'].isin(follow_up_exclude)]['mobile_number'].nunique()
-        assigned_to_agent = bot_latest[bot_latest['outcome'] == 'assign to live agent']['mobile_number'].nunique()
-        lost = bot_latest[bot_latest['outcome'] == 'lost']['mobile_number'].nunique()
-        converted = bot_latest[bot_latest['outcome'] == 'converted']['mobile_number'].nunique()
+        follow_up_count = bot_latest[bot_latest['follow_up_flag']]['mobile_number'].nunique()
+        assigned_to_agent = bot_latest[bot_latest['assigned_to_agent_flag']]['mobile_number'].nunique()
+        lost = bot_latest[bot_latest['lost_flag']]['mobile_number'].nunique()
+        converted = bot_latest[bot_latest['converted_flag']]['mobile_number'].nunique()
 
         unique_leads_row[bot_name] = unique_leads
         total_attempts_row[bot_name] = total_attempts
@@ -86,7 +92,6 @@ def calculate_report(df, avg_col=None):
         lost_row[bot_name] = lost
         converted_row[bot_name] = converted
 
-    # Add average row if requested (only in Streamlit display, not Excel)
     report_data = [
         unique_leads_row,
         total_attempts_row,
@@ -167,7 +172,6 @@ def style_generic_df(df):
     return styler
 
 
-# Streamlit UI code:
 st.title("Call Performance Report Generator")
 
 uploaded_file = st.file_uploader("Upload Call Log File", type=["csv", "xlsx"])
